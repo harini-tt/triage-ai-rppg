@@ -1,6 +1,5 @@
 import modal
 import base64
-import numpy as np
 from typing import Dict, Any, List
 import tempfile
 import os
@@ -24,17 +23,20 @@ image = (
         "ffmpeg"
     ])
     .pip_install_from_requirements("requirements.txt")
-    # Clone original PhysFormer repo
+    # Clone original PhysFormer repo and fix numpy compatibility
     .run_commands([
-        "cd /root && git clone https://github.com/ZitongYu/PhysFormer.git"
+        "cd /root && git clone https://github.com/ZitongYu/PhysFormer.git",
+        "cd /root/PhysFormer && sed -i 's/np\\.float/np.float64/g' *.py",
+        "cd /root/PhysFormer && sed -i 's/np\\.int/np.int64/g' *.py"
     ])
-    # Copy preprocessed frames and model to container
+    # Copy their p10 data structure and model to container  
     .add_local_dir("preprocessed_data", remote_path="/", copy=True)
     .add_local_file("Physformer_VIPL_fold1.pkl", remote_path="/root/PhysFormer/Physformer_VIPL_fold1.pkl", copy=True)
 )
 
 # Volume for model weights and cached data
 model_volume = modal.Volume.from_name("rppg-models", create_if_missing=True)
+output_volume = modal.Volume.from_name("rppg-outputs", create_if_missing=True)
 
 @app.function(
     image=image,
@@ -73,7 +75,7 @@ def run_physformer_inference():
 
 @app.function(
     image=image,
-    volumes={"/models": model_volume},
+    volumes={"/models": model_volume, "/mnt/outputs": output_volume},
     gpu="T4",
     timeout=600,  # 10 minutes for video processing
     memory=8192,
@@ -98,6 +100,27 @@ def extract_rppg_from_video(video_data: bytes, filename: str = "video.mp4") -> D
         # Run original PhysFormer inference
         result = run_physformer_inference.local()
         
+        # Save results to output volume
+        print("\n=== Extracting Generated Files ===")
+        os.system("mkdir -p /mnt/outputs")
+        os.system("cp -r /root/PhysFormer/*.txt /mnt/outputs/ 2>/dev/null || true")
+        os.system("cp -r /root/PhysFormer/*.csv /mnt/outputs/ 2>/dev/null || true") 
+        os.system("cp -r /root/PhysFormer/*.pkl /mnt/outputs/ 2>/dev/null || true")
+        os.system("cp -r /root/PhysFormer/*.mat /mnt/outputs/ 2>/dev/null || true")
+        
+        # Save the output logs
+        with open("/mnt/outputs/physformer_output.txt", "w") as f:
+            f.write("PhysFormer Output:\n")
+            f.write("=" * 50 + "\n")
+            f.write(result['stdout'])
+            if result['stderr']:
+                f.write("\n\nErrors:\n")
+                f.write("=" * 50 + "\n") 
+                f.write(result['stderr'])
+        
+        output_volume.commit()
+        print("✅ Files copied to rppg-outputs volume")
+        
         return {
             'status': 'success' if result['returncode'] == 0 else 'error',
             'filename': filename,
@@ -112,6 +135,26 @@ def extract_rppg_from_video(video_data: bytes, filename: str = "video.mp4") -> D
             'error': str(e),
             'filename': filename
         }
+
+@app.function(volumes={"/mnt/outputs": output_volume})
+def download_results():
+    """Download results from Modal volume to local"""
+    import os
+    import shutil
+    
+    # List files in output volume
+    files = os.listdir("/mnt/outputs")
+    print(f"📁 Files in output volume: {files}")
+    
+    # Copy all files to a downloadable location
+    result_files = {}
+    for file in files:
+        file_path = f"/mnt/outputs/{file}"
+        if os.path.isfile(file_path):
+            with open(file_path, 'rb') as f:
+                result_files[file] = f.read()
+    
+    return result_files
 
 @app.local_entrypoint()
 def main():
@@ -143,6 +186,21 @@ def main():
             print(f"Error: {results.get('error', 'Unknown')}")
             if results.get('errors'):
                 print(f"PhysFormer Errors: {results.get('errors')}")
+        
+        # Download results to local directory
+        print("\n📥 Downloading results from Modal volume...")
+        downloaded_files = download_results.remote()
+        
+        # Save files locally
+        os.makedirs("results", exist_ok=True)
+        for filename, content in downloaded_files.items():
+            local_path = f"results/{filename}"
+            with open(local_path, 'wb') as f:
+                f.write(content)
+            print(f"✅ Downloaded: {local_path}")
+        
+        print(f"\n📁 All results saved to: ./results/")
+        print("🎉 Check the 'results' folder for PhysFormer outputs!")
             
         return results
         
