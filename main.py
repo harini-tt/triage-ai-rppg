@@ -34,6 +34,82 @@ image = (
     .add_local_file("Physformer_VIPL_fold1.pkl", remote_path="/root/PhysFormer/Physformer_VIPL_fold1.pkl", copy=True)
 )
 
+def extract_frames_from_video(video_path, output_base_dir="preprocessed_data", subject_id="custom", video_id="v1", source_id="source1"):
+    """
+    Extract frames from MP4 video and save them in the same format as existing preprocessed data.
+    """
+    import cv2
+    from pathlib import Path
+
+    # Validate input video exists
+    if not os.path.exists(video_path):
+        print(f"❌ Error: Video file not found: {video_path}")
+        return False
+
+    # Create output directory structure matching existing format
+    output_dir = os.path.join(
+        output_base_dir,
+        "scratch",
+        "project_2003204",
+        "VIPL_frames",
+        subject_id,
+        video_id,
+        source_id
+    )
+
+    # Create directory if it doesn't exist
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+
+    # Open video file
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        print(f"❌ Error: Could not open video file: {video_path}")
+        return False
+
+    # Get video properties
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = frame_count / fps
+
+    print(f"🎥 Video Info:")
+    print(f"   - FPS: {fps:.2f}")
+    print(f"   - Total frames: {frame_count}")
+    print(f"   - Duration: {duration:.2f} seconds")
+    print(f"📁 Output directory: {output_dir}")
+
+    # Extract frames
+    frame_idx = 0
+    saved_frames = 0
+
+    while True:
+        ret, frame = cap.read()
+
+        if not ret:
+            break
+
+        # Save frame with same naming convention: image_XXXXX.png (5-digit zero-padded)
+        frame_filename = f"image_{frame_idx:05d}.png"
+        frame_path = os.path.join(output_dir, frame_filename)
+
+        # Save frame as PNG
+        cv2.imwrite(frame_path, frame)
+        saved_frames += 1
+
+        # Print progress every 50 frames
+        if saved_frames % 50 == 0:
+            print(f"   Extracted {saved_frames} frames...")
+
+        frame_idx += 1
+
+    # Cleanup
+    cap.release()
+
+    print(f"✅ Successfully extracted {saved_frames} frames to {output_dir}")
+    print(f"   Frame naming: image_00000.png to image_{saved_frames-1:05d}.png")
+
+    return True
+
 # Volume for model weights and cached data
 model_volume = modal.Volume.from_name("rppg-models", create_if_missing=True)
 output_volume = modal.Volume.from_name("rppg-outputs", create_if_missing=True)
@@ -156,13 +232,56 @@ def download_results():
     
     return result_files
 
+@app.function()
+def preprocess_video_to_frames(video_path: str, subject_id: str = "custom", video_id: str = "v1", source_id: str = "source1"):
+    """
+    Convert MP4 video to preprocessed frames format
+
+    Args:
+        video_path: Path to input MP4 video
+        subject_id: Subject identifier (default: "custom")
+        video_id: Video identifier (default: "v1")
+        source_id: Source identifier (default: "source1")
+    """
+    return extract_frames_from_video(
+        video_path=video_path,
+        output_base_dir="preprocessed_data",
+        subject_id=subject_id,
+        video_id=video_id,
+        source_id=source_id
+    )
+
 @app.local_entrypoint()
-def main():
-    """Local entrypoint - Test PhysFormer with test_vid.mp4"""
-    video_path = "test_videos/test_vid.mp4"
-    
-    print("🎥 Testing PhysFormer with test_vid.mp4")
-    print("=" * 50)
+def main(action: str = "test", video_path: str = "test_videos/test_vid.mp4", subject_id: str = "custom"):
+    """
+    Local entrypoint - Test PhysFormer or convert video to frames
+
+    Args:
+        action: Either "test" to run PhysFormer inference or "preprocess" to convert video to frames
+        video_path: Path to input video file
+        subject_id: Subject ID for preprocessing (default: "custom")
+    """
+
+    if action == "preprocess":
+        print("🔄 Converting video to preprocessed frames...")
+        print("=" * 50)
+
+        success = extract_frames_from_video(
+            video_path=video_path,
+            subject_id=subject_id
+        )
+
+        if success:
+            print("✅ Video preprocessing completed!")
+            print("🚀 Now you can run: python main.py test")
+        else:
+            print("❌ Video preprocessing failed!")
+
+        return {"action": "preprocess", "success": success}
+
+    elif action == "test":
+        print("🎥 Testing PhysFormer with preprocessed data")
+        print("=" * 50)
     
     # Load video
     try:

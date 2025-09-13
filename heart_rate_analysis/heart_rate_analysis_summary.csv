@@ -1,0 +1,2 @@
+subject_path,signal_length_samples,signal_duration_seconds,ground_truth_hr,physformer_hr,welch_estimated_hr,dominant_frequency_hz,signal_quality,confidence_score,snr,rmssd_ms,sdnn_ms,mean_rr_ms,hr_variability,physformer_error_bpm,welch_error_bpm
+p10/v1/source1,160,5.333333333333333,23.854083,83.588235,101.88679245283019,1.6981132075471699,good,0.6536916991432252,3.922150194859351,41.78554470186726,38.86407938787007,604.1666666666666,0.06432675209026771,59.734151999999995,78.03270945283019
