@@ -11,6 +11,7 @@ from scipy.fft import fft, fftfreq
 import mediapipe as mp
 from collections import deque
 import time
+import heartpy as hp  # NEW: Import HeartPy for RR estimation
 
 class LiveRPPGProcessor:
     def __init__(self, buffer_duration=10, fps=30):
@@ -23,6 +24,7 @@ class LiveRPPGProcessor:
         self.g_buffer = deque(maxlen=self.max_buffer_size)
         self.b_buffer = deque(maxlen=self.max_buffer_size)
         self.timestamps = deque(maxlen=self.max_buffer_size)
+        self.rppg_buffer = deque(maxlen=self.max_buffer_size)  # NEW: Buffer for rPPG signal
 
         # MediaPipe setup
         self.mp_face_detection = mp.solutions.face_detection
@@ -35,6 +37,11 @@ class LiveRPPGProcessor:
         self.current_hr = 0
         self.hr_history = deque(maxlen=10)
         self.last_hr_update = time.time()
+
+        # NEW: Respiratory rate tracking
+        self.current_rr = 0
+        self.rr_history = deque(maxlen=10)
+        self.last_rr_update = time.time()
 
     def detect_face_roi(self, frame):
         """Detect face region and extract forehead ROI"""
@@ -69,6 +76,15 @@ class LiveRPPGProcessor:
             self.g_buffer.append(g_mean)
             self.b_buffer.append(b_mean)
             self.timestamps.append(time.time())
+
+            # NEW: Compute rPPG signal and add to buffer
+            rppg_signal = self.apply_chrom_method(
+                np.array(list(self.r_buffer)),
+                np.array(list(self.g_buffer)),
+                np.array(list(self.b_buffer))
+            )
+            if len(rppg_signal) > 0:
+                self.rppg_buffer.append(rppg_signal[-1])  # Add latest rPPG sample
 
             return True
         return False
@@ -141,6 +157,65 @@ class LiveRPPGProcessor:
 
         return heart_rate
 
+    def estimate_respiratory_rate(self):  # NEW: Estimate respiratory rate using FFT
+        """Estimate respiratory rate from rPPG buffer using FFT analysis"""
+        if len(self.rppg_buffer) < self.fps * 10:  # Need at least 10 seconds
+            return 0
+
+        try:
+            rppg_signal = np.array(list(self.rppg_buffer))
+
+            # Remove DC component and normalize
+            rppg_signal = rppg_signal - np.mean(rppg_signal)
+            if np.std(rppg_signal) > 0:
+                rppg_signal = rppg_signal / np.std(rppg_signal)
+            else:
+                return 0
+
+            # Apply low-pass filter to emphasize respiratory modulation
+            from scipy import signal as sp_signal
+            nyquist = self.fps / 2
+
+            # Low-pass filter at 1 Hz to remove heart rate components
+            low_cutoff = 1.0 / nyquist
+            b_low, a_low = sp_signal.butter(4, low_cutoff, btype='low')
+            low_pass_signal = sp_signal.filtfilt(b_low, a_low, rppg_signal)
+
+            # Bandpass filter for respiratory frequencies (0.1-0.5 Hz = 6-30 breaths/min)
+            low = 0.1 / nyquist   # 6 breaths/min
+            high = 0.5 / nyquist  # 30 breaths/min
+            b, a = sp_signal.butter(4, [low, high], btype='band')
+            filtered_signal = sp_signal.filtfilt(b, a, low_pass_signal)
+
+            # Apply FFT to find dominant respiratory frequency
+            fft_vals = fft(filtered_signal)
+            freqs = fftfreq(len(filtered_signal), 1/self.fps)
+
+            # Focus on respiratory frequency range
+            valid_freqs = (freqs >= 0.1) & (freqs <= 0.5)  # 6-30 breaths/min
+            if not np.any(valid_freqs):
+                return 0
+
+            valid_fft = np.abs(fft_vals[valid_freqs])
+            valid_freq_range = freqs[valid_freqs]
+
+            if len(valid_fft) == 0:
+                return 0
+
+            # Find peak frequency
+            peak_freq = valid_freq_range[np.argmax(valid_fft)]
+            respiratory_rate = peak_freq * 60  # Convert to breaths/min
+
+            # Validate result
+            if 6 <= respiratory_rate <= 30:
+                return respiratory_rate
+            else:
+                return 0
+
+        except Exception as e:
+            print(f"DEBUG: RR estimation failed: {e}")
+            return 0
+
     def update_heart_rate(self):
         """Update heart rate estimate and smooth it"""
         current_time = time.time()
@@ -154,6 +229,14 @@ class LiveRPPGProcessor:
                 # Use median of recent estimates for stability
                 self.current_hr = np.median(list(self.hr_history))
 
+            # NEW: Update respiratory rate every 10 seconds
+            if current_time - self.last_rr_update > 10.0:
+                rr = self.estimate_respiratory_rate()
+                if rr > 0:
+                    self.rr_history.append(rr)
+                    self.current_rr = np.median(list(self.rr_history))
+                self.last_rr_update = current_time
+
             self.last_hr_update = current_time
 
     def reset_buffers(self):
@@ -162,8 +245,11 @@ class LiveRPPGProcessor:
         self.g_buffer.clear()
         self.b_buffer.clear()
         self.timestamps.clear()
+        self.rppg_buffer.clear()  # NEW: Reset rPPG buffer
         self.hr_history.clear()
+        self.rr_history.clear()  # NEW: Reset RR history
         self.current_hr = 0
+        self.current_rr = 0  # NEW: Reset current RR
 
     def draw_ui(self, frame, roi_coords):
         """Draw UI elements on frame"""
@@ -179,10 +265,15 @@ class LiveRPPGProcessor:
         cv2.putText(frame, hr_text, (10, 30),
                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
 
+        # NEW: Draw respiratory rate
+        rr_text = f"Resp Rate: {self.current_rr:.1f} breaths/min"
+        cv2.putText(frame, rr_text, (10, 60),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+
         # Draw buffer status
         buffer_pct = (len(self.r_buffer) / self.max_buffer_size) * 100
         buffer_text = f"Buffer: {buffer_pct:.0f}% ({len(self.r_buffer)}/{self.max_buffer_size})"
-        cv2.putText(frame, buffer_text, (10, 70),
+        cv2.putText(frame, buffer_text, (10, 90),  # Adjusted y-position
                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
 
         # Draw instructions
