@@ -1,3 +1,4 @@
 .DS_Store
 preprocessed_data/
 test_videos/
+.venv/
